@@ -37,64 +37,63 @@
 pub use std::io::Error as ReadError;
 use std::path::{Path, PathBuf};
 
-use bevy_app::{
-    CoreSet, {App, AppTypeRegistry, Plugin},
-};
+use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::{
-    entity::EntityMap,
-    prelude::*,
-    query::ReadOnlyWorldQuery,
-    schedule::{SystemConfig, SystemConfigs},
+  entity::EntityMap,
+  prelude::*,
+  query::ReadOnlyWorldQuery,
+  schedule::{SystemConfigs},
 };
 use bevy_hierarchy::DespawnRecursiveExt;
 #[cfg(feature = "hierarchy")]
 use bevy_hierarchy::{BuildChildren, Parent};
 use bevy_scene::{serde::SceneDeserializer, SceneSpawnError};
 use bevy_utils::{
-    tracing::{error, info, warn},
-    HashMap,
+  tracing::{error, info, warn},
+  HashMap,
 };
 pub use ron::de::SpannedError as ParseError;
 pub use ron::Error as DeserializeError;
 use serde::de::DeserializeSeed;
 
 use crate::{
-    save::{Save, SaveSet, Saved},
-    utils::{has_event, has_resource, remove_resource},
+  save::{Save, SaveSet, Saved},
+  utils::{has_event, has_resource, remove_resource},
 };
 
 /// A [`Plugin`] which configures [`LoadSet`] and adds systems to support loading [`Saved`] data.
 pub struct LoadPlugin;
 
 impl Plugin for LoadPlugin {
-    fn build(&self, app: &mut App) {
-        app.configure_sets(
-            (
-                LoadSet::Load,
-                LoadSet::PostLoad.run_if(has_resource::<Loaded>),
-                LoadSet::Flush.run_if(has_resource::<Loaded>),
-            )
-                .chain()
-                .after(CoreSet::FirstFlush)
-                .before(SaveSet::Save),
+  fn build(&self, app: &mut App) {
+    app
+      .configure_sets(
+        PreUpdate,
+        (
+          LoadSet::Load,
+          LoadSet::PostLoad.run_if(has_resource::<Loaded>),
+          LoadSet::Flush.run_if(has_resource::<Loaded>),
         )
-        .add_systems((remove_resource::<Loaded>, apply_system_buffers).in_set(LoadSet::Flush));
+          .chain()
+          .before(SaveSet::Save),
+      )
+      .add_systems(PreUpdate, (remove_resource::<Loaded>, apply_deferred).in_set(LoadSet::Flush));
 
-        #[cfg(feature = "hierarchy")]
-        app.add_system(hierarchy_from_loaded.in_set(LoadSet::PostLoad));
-    }
+    #[cfg(feature = "hierarchy")]
+    app.add_systems(PreUpdate, hierarchy_from_loaded.in_set(LoadSet::PostLoad));
+  }
 }
 
 /// A [`SystemSet`] with all systems that process loading [`Saved`] data.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, SystemSet)]
 pub enum LoadSet {
-    /// Runs before all other systems in this set.
-    /// It is reserved for systems which deserialize [`Saved`] data and process the output.
-    Load,
-    /// Runs after [`LoadSet::Load`].
-    PostLoad,
-    /// Runs after [`LoadSet::PostLoad`] and flushes system buffers.
-    Flush,
+  /// Runs before all other systems in this set.
+  /// It is reserved for systems which deserialize [`Saved`] data and process the output.
+  Load,
+  /// Runs after [`LoadSet::Load`].
+  PostLoad,
+  /// Runs after [`LoadSet::PostLoad`] and flushes system buffers.
+  Flush,
 }
 
 /// A [`Component`] which marks its [`Entity`] to be despawned prior to load.
@@ -144,49 +143,49 @@ pub struct Unload;
 /// A [`Resource`] which contains the loaded entity map. See [`FromLoaded`] for usage.
 #[derive(Resource)]
 pub struct Loaded {
-    entities: HashMap<u32, Entity>,
+  entities: HashMap<u32, Entity>,
 }
 
 impl Loaded {
-    pub fn entities(&self) -> impl Iterator<Item = Entity> + '_ {
-        self.entities.values().copied()
-    }
+  pub fn entities(&self) -> impl Iterator<Item = Entity> + '_ {
+    self.entities.values().copied()
+  }
 
-    pub fn entity(&self, index: u32) -> Entity {
-        *self.entities.get(&index).unwrap()
-    }
+  pub fn entity(&self, index: u32) -> Entity {
+    *self.entities.get(&index).unwrap()
+  }
 }
 
 #[derive(Debug)]
 pub enum Error {
-    Read(ReadError),
-    Parse(ParseError),
-    Deserialize(DeserializeError),
-    Scene(SceneSpawnError),
+  Read(ReadError),
+  Parse(ParseError),
+  Deserialize(DeserializeError),
+  Scene(SceneSpawnError),
 }
 
 impl From<ReadError> for Error {
-    fn from(why: ReadError) -> Self {
-        Self::Read(why)
-    }
+  fn from(why: ReadError) -> Self {
+    Self::Read(why)
+  }
 }
 
 impl From<ParseError> for Error {
-    fn from(why: ParseError) -> Self {
-        Self::Parse(why)
-    }
+  fn from(why: ParseError) -> Self {
+    Self::Parse(why)
+  }
 }
 
 impl From<DeserializeError> for Error {
-    fn from(why: DeserializeError) -> Self {
-        Self::Deserialize(why)
-    }
+  fn from(why: DeserializeError) -> Self {
+    Self::Deserialize(why)
+  }
 }
 
 impl From<SceneSpawnError> for Error {
-    fn from(why: SceneSpawnError) -> Self {
-        Self::Scene(why)
-    }
+  fn from(why: SceneSpawnError) -> Self {
+    Self::Scene(why)
+  }
 }
 
 /// A [`SystemConfig`] which unloads the current [`World`] and loads a new one from [`Saved`] data
@@ -207,103 +206,92 @@ impl From<SceneSpawnError> for Error {
 ///     todo!()
 /// }
 /// ```
-pub fn load_from_file(path: impl Into<PathBuf>) -> SystemConfig {
-    let path = path.into();
-    from_file(path)
-        .pipe(unload::<Or<(With<Save>, With<Unload>)>>)
-        .pipe(load)
-        .pipe(insert_into_loaded(Save))
-        .pipe(finish)
-        .in_set(LoadSet::Load)
+pub fn load_from_file(path: impl Into<PathBuf>) -> SystemConfigs {
+  let path = path.into();
+  from_file(path)
+    .pipe(unload::<Or<(With<Save>, With<Unload>)>>)
+    .pipe(load)
+    .pipe(insert_into_loaded(Save))
+    .pipe(finish)
+    .in_set(LoadSet::Load)
 }
 
 /// A [`System`] which read [`Saved`] data from a file at given `path`.
-pub fn from_file(
-    path: impl Into<PathBuf>,
-) -> impl Fn(Res<AppTypeRegistry>) -> Result<Saved, Error> {
-    let path = path.into();
-    move |type_registry| {
-        let input = std::fs::read(&path)?;
-        let mut deserializer = ron::Deserializer::from_bytes(&input)?;
-        let scene = {
-            let type_registry = &type_registry.read();
-            let scene_deserializer = SceneDeserializer { type_registry };
-            scene_deserializer.deserialize(&mut deserializer)?
-        };
-        info!("loaded from file: {path:?}");
-        Ok(Saved { scene })
-    }
-}
-
-pub fn from_file_dyn(
-    In(path): In<PathBuf>,
-    type_registry: Res<AppTypeRegistry>,
-) -> Result<Saved, Error> {
+pub fn from_file(path: impl Into<PathBuf>) -> impl Fn(Res<AppTypeRegistry>) -> Result<Saved, Error> {
+  let path = path.into();
+  move |type_registry| {
     let input = std::fs::read(&path)?;
     let mut deserializer = ron::Deserializer::from_bytes(&input)?;
     let scene = {
-        let type_registry = &type_registry.read();
-        let scene_deserializer = SceneDeserializer { type_registry };
-        scene_deserializer.deserialize(&mut deserializer)?
+      let type_registry = &type_registry.read();
+      let scene_deserializer = SceneDeserializer { type_registry };
+      scene_deserializer.deserialize(&mut deserializer)?
     };
     info!("loaded from file: {path:?}");
     Ok(Saved { scene })
+  }
+}
+
+pub fn from_file_dyn(In(path): In<PathBuf>, type_registry: Res<AppTypeRegistry>) -> Result<Saved, Error> {
+  let input = std::fs::read(&path)?;
+  let mut deserializer = ron::Deserializer::from_bytes(&input)?;
+  let scene = {
+    let type_registry = &type_registry.read();
+    let scene_deserializer = SceneDeserializer { type_registry };
+    scene_deserializer.deserialize(&mut deserializer)?
+  };
+  info!("loaded from file: {path:?}");
+  Ok(Saved { scene })
 }
 
 /// A [`System`] which unloads all entities that match the given `Filter` during load.
 pub fn unload<Filter: ReadOnlyWorldQuery>(
-    In(result): In<Result<Saved, Error>>,
-    world: &mut World,
+  In(result): In<Result<Saved, Error>>,
+  world: &mut World,
 ) -> Result<Saved, Error> {
-    let saved = result?;
-    let unload_entities: Vec<Entity> = world
-        .query_filtered::<Entity, Filter>()
-        .iter(world)
-        .collect();
-    for entity in unload_entities {
-        if let Some(entity) = world.get_entity_mut(entity) {
-            entity.despawn_recursive();
-        }
+  let saved = result?;
+  let unload_entities: Vec<Entity> = world.query_filtered::<Entity, Filter>().iter(world).collect();
+  for entity in unload_entities {
+    if let Some(entity) = world.get_entity_mut(entity) {
+      entity.despawn_recursive();
     }
-    Ok(saved)
+  }
+  Ok(saved)
 }
 
 /// A [`System`] which writes [`Saved`] data into current [`World`].
 pub fn load(In(result): In<Result<Saved, Error>>, world: &mut World) -> Result<Loaded, Error> {
-    let Saved { scene } = result?;
-    let mut entity_map = EntityMap::default();
-    scene.write_to_world(world, &mut entity_map)?;
-    let entities = entity_map
-        .iter()
-        .map(|(key, entity)| (key.index(), entity))
-        .collect();
+  let Saved { scene } = result?;
+  let mut entity_map = EntityMap::default();
+  scene.write_to_world(world, &mut entity_map)?;
+  let entities = entity_map.iter().map(|(key, entity)| (key.index(), entity)).collect();
 
-    Ok(Loaded { entities })
+  Ok(Loaded { entities })
 }
 
 pub fn insert_into_loaded(
-    bundle: impl Bundle + Clone,
+  bundle: impl Bundle + Clone,
 ) -> impl Fn(In<Result<Loaded, Error>>, &mut World) -> Result<Loaded, Error> {
-    move |In(result), world| {
-        if let Ok(loaded) = &result {
-            for entity in loaded.entities() {
-                world.entity_mut(entity).insert(bundle.clone());
-            }
-        }
-        result
+  move |In(result), world| {
+    if let Ok(loaded) = &result {
+      for entity in loaded.entities() {
+        world.entity_mut(entity).insert(bundle.clone());
+      }
     }
+    result
+  }
 }
 
 /// A [`System`] which finishes the load process.
 pub fn finish(In(result): In<Result<Loaded, Error>>, world: &mut World) {
-    match result {
-        Ok(loaded) => world.insert_resource(loaded),
-        Err(why) => error!("load failed: {why:?}"),
-    }
+  match result {
+    Ok(loaded) => world.insert_resource(loaded),
+    Err(why) => error!("load failed: {why:?}"),
+  }
 }
 
 pub trait LoadFromFileRequest {
-    fn path(&self) -> &Path;
+  fn path(&self) -> &Path;
 }
 
 /// A load pipeline ([`SystemConfigs`]) which works similarly to [`load_from_file`],
@@ -330,25 +318,25 @@ pub trait LoadFromFileRequest {
 ///
 /// let mut app = App::new();
 /// app.add_plugins(MinimalPlugins)
-///     .add_plugin(LoadPlugin)
-///     .add_systems(load_from_file_on_request::<LoadRequest>());
+///     .add_plugins(LoadPlugin)
+///     .add_systems(PreUpdate, load_from_file_on_request::<LoadRequest>());
 /// ```
 pub fn load_from_file_on_request<R>() -> SystemConfigs
 where
-    R: LoadFromFileRequest + Resource,
+  R: LoadFromFileRequest + Resource,
 {
-    (
-        file_from_request::<R>
-            .pipe(from_file_dyn)
-            .pipe(unload::<Or<(With<Save>, With<Unload>)>>)
-            .pipe(load)
-            .pipe(insert_into_loaded(Save))
-            .pipe(finish),
-        remove_resource::<R>,
-    )
-        .chain()
-        .in_set(LoadSet::Load)
-        .distributive_run_if(has_resource::<R>)
+  (
+    file_from_request::<R>
+      .pipe(from_file_dyn)
+      .pipe(unload::<Or<(With<Save>, With<Unload>)>>)
+      .pipe(load)
+      .pipe(insert_into_loaded(Save))
+      .pipe(finish),
+    remove_resource::<R>,
+  )
+    .chain()
+    .in_set(LoadSet::Load)
+    .distributive_run_if(has_resource::<R>)
 }
 
 /// A save pipeline ([`SystemConfigs`]) which works similarly to [`load_from_file_on_request`],
@@ -357,36 +345,36 @@ where
 /// Note: If multiple events are sent in a single update cycle, only the first one is processed.
 pub fn load_from_file_on_event<R>() -> SystemConfigs
 where
-    R: LoadFromFileRequest + Send + Sync + 'static,
+  R: Event + LoadFromFileRequest + Send + Sync + 'static,
 {
-    (file_from_event::<R>
-        .pipe(from_file_dyn)
-        .pipe(unload::<Or<(With<Save>, With<Unload>)>>)
-        .pipe(load)
-        .pipe(insert_into_loaded(Save))
-        .pipe(finish),)
-        .chain()
-        .in_set(LoadSet::Load)
-        .distributive_run_if(has_event::<R>)
+  (file_from_event::<R>
+    .pipe(from_file_dyn)
+    .pipe(unload::<Or<(With<Save>, With<Unload>)>>)
+    .pipe(load)
+    .pipe(insert_into_loaded(Save))
+    .pipe(finish),)
+    .chain()
+    .in_set(LoadSet::Load)
+    .distributive_run_if(has_event::<R>)
 }
 
 pub fn file_from_request<R>(request: Res<R>) -> PathBuf
 where
-    R: LoadFromFileRequest + Resource,
+  R: LoadFromFileRequest + Resource,
 {
-    request.path().to_owned()
+  request.path().to_owned()
 }
 
 pub fn file_from_event<R>(mut events: EventReader<R>) -> PathBuf
 where
-    R: LoadFromFileRequest + Send + Sync + 'static,
+  R: Event + LoadFromFileRequest + Send + Sync + 'static,
 {
-    let mut iter = events.iter();
-    let event = iter.next().unwrap();
-    if iter.next().is_some() {
-        warn!("multiple load request events received; only the first one is processed.");
-    }
-    event.path().to_owned()
+  let mut iter = events.iter();
+  let event = iter.next().unwrap();
+  if iter.next().is_some() {
+    warn!("multiple load request events received; only the first one is processed.");
+  }
+  event.path().to_owned()
 }
 
 /// A trait used by types which reference entities to update themselves from [`Loaded`] data during [`LoadSet::PostLoad`].
@@ -420,64 +408,58 @@ where
 ///     .add_system(component_from_loaded::<Data>());
 /// ```
 pub trait FromLoaded {
-    fn from_loaded(_: Self, loaded: &Loaded) -> Self;
+  fn from_loaded(_: Self, loaded: &Loaded) -> Self;
 }
 
 impl FromLoaded for Entity {
-    fn from_loaded(old: Self, loaded: &Loaded) -> Self {
-        loaded.entity(old.index())
-    }
+  fn from_loaded(old: Self, loaded: &Loaded) -> Self {
+    loaded.entity(old.index())
+  }
 }
 
 impl<T: FromLoaded> FromLoaded for Option<T> {
-    fn from_loaded(old: Self, loaded: &Loaded) -> Self {
-        old.map(|old| T::from_loaded(old, loaded))
-    }
+  fn from_loaded(old: Self, loaded: &Loaded) -> Self {
+    old.map(|old| T::from_loaded(old, loaded))
+  }
 }
 
 impl<T: FromLoaded> FromLoaded for Vec<T> {
-    fn from_loaded(old: Self, loaded: &Loaded) -> Self {
-        old.into_iter()
-            .map(|old| T::from_loaded(old, loaded))
-            .collect()
-    }
+  fn from_loaded(old: Self, loaded: &Loaded) -> Self {
+    old.into_iter().map(|old| T::from_loaded(old, loaded)).collect()
+  }
 }
 
 /// A [`SystemConfig`] which automatically invokes [`FromLoaded`] on given [`Component`] type during [`LoadSet::PostLoad`].
-pub fn component_from_loaded<T: Component + FromLoaded>() -> SystemConfig {
-    (|loaded: Res<Loaded>, mut query: Query<&mut T>| {
-        for mut component in query.iter_mut() {
-            // SAFE: Reassign to `Mut<T>`
-            let ptr = component.as_mut() as *mut T;
-            let old = unsafe { std::ptr::read(ptr) };
-            let new = T::from_loaded(old, &loaded);
-            unsafe { std::ptr::write(ptr, new) };
-        }
-    })
-    .in_set(LoadSet::PostLoad)
+pub fn component_from_loaded<T: Component + FromLoaded>() -> SystemConfigs {
+  (|loaded: Res<Loaded>, mut query: Query<&mut T>| {
+    for mut component in query.iter_mut() {
+      // SAFE: Reassign to `Mut<T>`
+      let ptr = component.as_mut() as *mut T;
+      let old = unsafe { std::ptr::read(ptr) };
+      let new = T::from_loaded(old, &loaded);
+      unsafe { std::ptr::write(ptr, new) };
+    }
+  })
+  .in_set(LoadSet::PostLoad)
 }
 
 #[cfg(feature = "hierarchy")]
-pub fn hierarchy_from_loaded(
-    loaded: Res<Loaded>,
-    query: Query<(Entity, &Parent)>,
-    mut commands: Commands,
-) {
-    for (entity, old_parent) in &query {
-        let new_parent = loaded.entity(old_parent.get().index());
-        commands.entity(entity).set_parent(new_parent);
-    }
+pub fn hierarchy_from_loaded(loaded: Res<Loaded>, query: Query<(Entity, &Parent)>, mut commands: Commands) {
+  for (entity, old_parent) in &query {
+    let new_parent = loaded.entity(old_parent.get().index());
+    commands.entity(entity).set_parent(new_parent);
+  }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs::*;
+  use std::fs::*;
 
-    use bevy::prelude::*;
+  use bevy::prelude::*;
 
-    use super::*;
+  use super::*;
 
-    pub const DATA: &str = "(
+  pub const DATA: &str = "(
         entities: {
             0: (
                 components: {
@@ -487,162 +469,155 @@ mod tests {
         },
     )";
 
-    #[derive(Component, Default, Reflect)]
-    #[reflect(Component)]
-    struct Dummy;
+  #[derive(Component, Default, Reflect)]
+  #[reflect(Component)]
+  struct Dummy;
 
-    #[test]
-    fn test_load_from_file() {
-        pub const PATH: &str = "test_load.ron";
+  #[test]
+  fn test_load_from_file() {
+    pub const PATH: &str = "test_load.ron";
 
-        write(PATH, DATA).unwrap();
+    write(PATH, DATA).unwrap();
 
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .register_type::<Dummy>()
-            .add_system(load_from_file(PATH));
+    let mut app = App::new();
+    app
+      .add_plugins(MinimalPlugins)
+      .register_type::<Dummy>()
+      .add_system(load_from_file(PATH));
 
-        app.update();
+    app.update();
 
-        assert!(app
-            .world
-            .query::<With<Dummy>>()
-            .get_single(&app.world)
-            .is_ok());
+    assert!(app.world.query::<With<Dummy>>().get_single(&app.world).is_ok());
 
-        remove_file(PATH).unwrap();
+    remove_file(PATH).unwrap();
+  }
+
+  #[test]
+  fn test_load_from_file_on_request() {
+    pub const PATH: &str = "test_load_on_request_dyn.ron";
+
+    write(PATH, DATA).unwrap();
+
+    #[derive(Resource)]
+    struct LoadRequest;
+
+    impl LoadFromFileRequest for LoadRequest {
+      fn path(&self) -> &Path {
+        Path::new(PATH)
+      }
     }
 
-    #[test]
-    fn test_load_from_file_on_request() {
-        pub const PATH: &str = "test_load_on_request_dyn.ron";
+    let mut app = App::new();
+    app
+      .add_plugins(MinimalPlugins)
+      .register_type::<Dummy>()
+      .add_systems(PreUpdate, load_from_file_on_request::<LoadRequest>());
 
-        write(PATH, DATA).unwrap();
+    app.world.insert_resource(LoadRequest);
+    app.update();
 
-        #[derive(Resource)]
-        struct LoadRequest;
+    assert!(app.world.query::<With<Dummy>>().get_single(&app.world).is_ok());
 
-        impl LoadFromFileRequest for LoadRequest {
-            fn path(&self) -> &Path {
-                Path::new(PATH)
-            }
-        }
+    remove_file(PATH).unwrap();
+  }
 
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .register_type::<Dummy>()
-            .add_systems(load_from_file_on_request::<LoadRequest>());
+  #[test]
+  fn test_load_from_file_on_event() {
+    pub const PATH: &str = "test_load_on_request_event.ron";
 
-        app.world.insert_resource(LoadRequest);
-        app.update();
+    write(PATH, DATA).unwrap();
 
-        assert!(app
-            .world
-            .query::<With<Dummy>>()
-            .get_single(&app.world)
-            .is_ok());
+    struct LoadRequest;
 
-        remove_file(PATH).unwrap();
+    impl LoadFromFileRequest for LoadRequest {
+      fn path(&self) -> &Path {
+        Path::new(PATH)
+      }
     }
 
-    #[test]
-    fn test_load_from_file_on_event() {
-        pub const PATH: &str = "test_load_on_request_event.ron";
+    let mut app = App::new();
+    app
+      .add_plugins(MinimalPlugins)
+      .register_type::<Dummy>()
+      .add_event::<LoadRequest>()
+      .add_systems(PreUpdate, load_from_file_on_event::<LoadRequest>());
 
-        write(PATH, DATA).unwrap();
+    app.world.send_event(LoadRequest);
+    app.update();
 
-        struct LoadRequest;
+    assert!(app.world.query::<With<Dummy>>().get_single(&app.world).is_ok());
 
-        impl LoadFromFileRequest for LoadRequest {
-            fn path(&self) -> &Path {
-                Path::new(PATH)
-            }
-        }
+    remove_file(PATH).unwrap();
+  }
 
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .register_type::<Dummy>()
-            .add_event::<LoadRequest>()
-            .add_systems(load_from_file_on_event::<LoadRequest>());
+  #[test]
+  #[cfg(feature = "hierarchy")]
+  fn test_hierarchy() {
+    use std::fs::*;
 
-        app.world.send_event(LoadRequest);
-        app.update();
+    use bevy::prelude::*;
 
-        assert!(app
-            .world
-            .query::<With<Dummy>>()
-            .get_single(&app.world)
-            .is_ok());
+    use crate::save::{save_into_file, SavePlugin};
 
-        remove_file(PATH).unwrap();
+    pub const PATH: &str = "test_load_hierarchy.ron";
+
+    {
+      let mut app = App::new();
+      app
+        .add_plugins(MinimalPlugins)
+        .add_plugin(HierarchyPlugin)
+        .add_plugin(SavePlugin)
+        .add_system(save_into_file(PATH));
+
+      let entity = app
+        .world
+        .spawn(Save)
+        .with_children(|parent| {
+          parent.spawn(Save);
+          parent.spawn(Save);
+        })
+        .id();
+
+      app.update();
+
+      let world = app.world;
+      let children = world.get::<Children>(entity).unwrap();
+      assert_eq!(children.iter().count(), 2);
+      for child in children.iter() {
+        let parent = world.get::<Parent>(*child).unwrap().get();
+        assert_eq!(parent, entity);
+      }
     }
 
-    #[test]
-    #[cfg(feature = "hierarchy")]
-    fn test_hierarchy() {
-        use std::fs::*;
-
-        use bevy::prelude::*;
-
-        use crate::save::{save_into_file, SavePlugin};
-
-        pub const PATH: &str = "test_load_hierarchy.ron";
-
-        {
-            let mut app = App::new();
-            app.add_plugins(MinimalPlugins)
-                .add_plugin(HierarchyPlugin)
-                .add_plugin(SavePlugin)
-                .add_system(save_into_file(PATH));
-
-            let entity = app
-                .world
-                .spawn(Save)
-                .with_children(|parent| {
-                    parent.spawn(Save);
-                    parent.spawn(Save);
-                })
-                .id();
-
-            app.update();
-
-            let world = app.world;
-            let children = world.get::<Children>(entity).unwrap();
-            assert_eq!(children.iter().count(), 2);
-            for child in children.iter() {
-                let parent = world.get::<Parent>(*child).unwrap().get();
-                assert_eq!(parent, entity);
-            }
-        }
-
-        {
-            // Hierarchy should not contain children
-            let data = std::fs::read_to_string(PATH).unwrap();
-            assert!(data.contains("Parent"));
-            assert!(!data.contains("Children"));
-        }
-
-        {
-            let mut app = App::new();
-            app.add_plugins(MinimalPlugins)
-                .add_plugin(HierarchyPlugin)
-                .add_plugin(LoadPlugin)
-                .add_system(load_from_file(PATH));
-
-            // Spawn an entity to offset indices
-            app.world.spawn_empty();
-
-            app.update();
-
-            let mut world = app.world;
-            let (entity, children) = world.query::<(Entity, &Children)>().single(&world);
-            assert_eq!(children.iter().count(), 2);
-            for child in children.iter() {
-                let parent = world.get::<Parent>(*child).unwrap().get();
-                assert_eq!(parent, entity);
-            }
-        }
-
-        remove_file(PATH).unwrap();
+    {
+      // Hierarchy should not contain children
+      let data = std::fs::read_to_string(PATH).unwrap();
+      assert!(data.contains("Parent"));
+      assert!(!data.contains("Children"));
     }
+
+    {
+      let mut app = App::new();
+      app
+        .add_plugins(MinimalPlugins)
+        .add_plugin(HierarchyPlugin)
+        .add_plugin(LoadPlugin)
+        .add_system(load_from_file(PATH));
+
+      // Spawn an entity to offset indices
+      app.world.spawn_empty();
+
+      app.update();
+
+      let mut world = app.world;
+      let (entity, children) = world.query::<(Entity, &Children)>().single(&world);
+      assert_eq!(children.iter().count(), 2);
+      for child in children.iter() {
+        let parent = world.get::<Parent>(*child).unwrap().get();
+        assert_eq!(parent, entity);
+      }
+    }
+
+    remove_file(PATH).unwrap();
+  }
 }
